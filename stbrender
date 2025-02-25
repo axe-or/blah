@@ -1,90 +1,106 @@
 # Better text rendering with STB TrueType using signed distance fields
 
-Text rendering is a [notouriously difficult problem](https://faultlore.com/blah/text-hates-you/), to aid with such 
-problem there are very few libraries, the most famous open source one being FreeType+Harfbuzz. That being said, if you 
-ever tried to compile FreeType you'll know that compiling and understanding what is even happening is quite annoying, 
-it's also a beefy dependency with an esoteric module system and code that is also inconsistent, so much so I had to 
-[write my own container](https://github.com/marcs-feh/freetype_slim) just to build it the way I want it and even then I was not very satisfied.
+Text rendering is a [notouriously difficult problem](https://faultlore.com/blah/text-hates-you/), to 
+aid with such problem there are very few libraries, the most famous open source one being 
+FreeType+Harfbuzz. That being said, if you ever tried to compile FreeType you'll know that compiling 
+and understanding what is even happening is quite annoying, it's also a beefy dependency with an 
+esoteric module system and code that is also inconsistent, so much so I had to [write my own 
+container](https://github.com/marcs-feh/freetype_slim) just to build it the way I want it and even 
+then I was not very satisfied.
 
-Unfortunately, if you really do want to handle all languages there's no other choice but FreeType or relying on things 
-like Windows' and OSX's native proprietary libraries. Hopefully one day we might have saner libraries, but that day is 
-not today.
+Unfortunately, if you really do want to handle all languages there's no other choice but FreeType or 
+relying on things like Windows' and OSX's native proprietary libraries. Hopefully one day we might 
+have saner libraries, but that day is not today.
 
-There is however, some hope, the set of public domain [STB Libraries]() provide simple and self-contained code that you 
-can freely use, they are honestly a standard to what dependencies should aspire to be. Due to their aggressive 
-simplicity, it's not always possible to have the same level of features as their bigger counterparts. A good example is 
-`stb_truetype` which handles parsing and rendering of TTF files.
+There is however, some hope, the set of public domain [STB Libraries]() provide simple and 
+self-contained code that you can freely use, they are honestly a standard to what dependencies should 
+aspire to be. Due to their aggressive simplicity, it's not always possible to have the same level of 
+features as their bigger counterparts. A good example is `stb_truetype` which handles parsing and 
+rendering of TTF files.
 
-Unlike FreeType it does not do any fancy auto-hinting to improve image quality in lower resolutions, nor does it handle any advanced text shaping and ligatures well. It does however provide a Good 
-Enough solution for rendering text in languages that have the following characteristics:
+Unlike FreeType it does not do any fancy auto-hinting to improve image quality in lower resolutions, 
+nor does it handle any advanced text shaping and ligatures well. It does however provide a Good Enough 
+solution for rendering text in languages that have the following characteristics:
 
 - No bidirectional text
 - No mandatory usage of ligatures
 - No complex character combining rules
 
-These restrictions allow it to reasonably render all European scripts such as Latin, Cyrillic, Greek. It also means you 
-can render legible Japanese and Chinese. This also includes other alphabetic/logographic scripts that can be written 
-is without ligatures.
+These restrictions allow it to reasonably render all European scripts such as Latin, Cyrillic, Greek. 
+It also means you can render legible Japanese and Chinese. This also includes other 
+alphabetic/logographic scripts that can be written is without ligatures.
 
-So as long as you are willing to take this trade-off, the technique I'll discuss in this article can yield pretty decent 
-text rendering even at lower resolutions, but above all I believe this technique is useful because it can be tweaked very 
-easily and implemented in <200 lines of code.
+So as long as you are willing to take this trade-off, the technique I'll discuss in this article can 
+yield pretty decent text rendering even at lower resolutions, but above all I believe this technique 
+is useful because it can be tweaked very easily and implemented in <200 lines of code.
 
 ## Fonts and signed distance fields
 
-Fonts are rarely made as a bitmap, instead for each *glyph* a font exposes it defines a *contour*, that is a composite 
-curve that define the abtract shape of the character, this allows fonts to be *rendered* (transformed into bitmaps) into 
-a variety of sizes without having to add a lot of redundancy.
+Fonts are rarely made as a bitmap, instead for each *glyph* a font exposes it defines a *contour*, 
+that is a composite curve that define the abtract shape of the character, this allows fonts to be 
+*rendered* (transformed into bitmaps) into a variety of sizes without having to add a lot of 
+redundancy.
 
-Generally algorithms to draw these contours are vaguely similar to how a human draws shapes, a cursor is set at an origin 
-point and the curve is filled from there. This approach is intuitive and reasonably fast, but can lead to poor image 
-quality at lower resolutions, requiring very complex hinting algorithms, this approach is also not suitable for fonts 
-that change in real time, which may be commonly used in applications like CAD software and videogames.
+Generally algorithms to draw these contours are vaguely similar to how a human draws shapes, a cursor 
+is set at an origin point and the curve is filled from there. This approach is intuitive and 
+reasonably fast, but can lead to poor image quality at lower resolutions, requiring very complex 
+hinting algorithms, this "traditional" approach is thus not suitable for fonts that change in real 
+time, which may be commonly used in applications like CAD software and videogames.
 
-There's another way to draw fonts however, instead of taking the contour and filling it, we take its shape and for 
-every point in an area around it, we measure the (closest) distance of the point to the contour's edge. In this 
-representation, points right on top of the contour line would have a distance of 0, points "inside" the glyph are 
-negative and points outside are positive. If you ever heard of the barycentric method for drawing triangles or 
-other forms of constructive geometry this will sound familiar to you.
+There's another way to draw fonts however, instead of taking the contour and filling it, we take its 
+shape and for every point in an area around it, we measure the (closest) distance of the point to the 
+contour's edge. In this representation, points right on top of the contour line would have a distance 
+of 0, points "inside" the glyph are negative and points outside are positive. If you ever heard of the 
+barycentric method for drawing triangles or other forms of constructive geometry this will sound 
+familiar to you.
 
-Here's an example for the SDF for the letter G, brightness indicates how "inside" a point is to the contour.
+Here's an example for the SDF for the letter G, brightness indicates how "inside" a point is to the 
+contour.
 
 ![G's SDF at a pixel height of 32](g_sdf.png)
 
+This application of SDFs is focused on mostly static text rendering, but note that SDFs are very well 
+suited for usage in situations with more dynamic text with plenty of scaling.
+
+> Note that in our implementation, values will be normalized to fit a 0-255 range, so we can store 
+> them as a 8-bit single channel bitmap for memory efficiency reasons.
+
 ## Drawing a font using a SDF
 
-To draw a glyph we must simply loop over each point in the field and ask "Should we color this pixel?", this works but 
-will lead to a jagged(without anti-aliasing) image by the end of it, but instead there's an approach that we can use. 
-Instead of simply checking "Should we fill this pixel?" we instead ask "*How much* should we fill this pixel?".
-We can then use a "Activation Function" that decides how opaque, in a scale from 0 to 1, the rendered pixel will be.
+To draw a glyph we must simply loop over each point in the field and ask "Should we color this 
+pixel?", this works but will lead to a jagged(without anti-aliasing) image by the end of it, but 
+instead there's an approach that we can use. Instead of simply checking "Should we fill this pixel?" 
+we instead ask "*How much* should we fill this pixel?". We can then use a "Activation Function" that 
+decides how opaque, in a scale from 0 to 1, the rendered pixel will be.
 
 ```
 A(p) -> α ∈ [0, 1]
 ```
 
-Where `A` is our activation function and `α` is a real number defining how opaque the pixel is, 0 is fully transparent 
-and 1 is fully opaque.
+Where `A` is our activation function and `α` is a real number defining how opaque the pixel is, 0 is 
+fully transparent and 1 is fully opaque.
 
 In this article I'll be using a sigmoid function, defined as:
 ```
 f(x) = 1 / (1 + e ^ - k * (x + s))
 ```
 
-Where `e` is Euler's number and `k` and `s` are constants.
+Where `e` is Euler's constant and `k` and `s` are user-defined constants.
 
 The graph for the sigmoid function (assuming `k = 1` and `s = 0` looks like this:
 
 ![Regular Sigmoid Function](sigmoid_regular.png)
 
-We can use the `s` parameter to shift the function to the range we want, in this case [0, 1], and `k` to make the 
-transition steeper, this is similar to a digital brush "hardness" setting.
+We can use the `s` parameter to shift the function to the range we want, in this case [0, 1], and `k` 
+to make the transition steeper, this is similar to a digital brush "hardness" setting.
 
 ![Adjusted Sigmoid Function](sigmoid_adjusted.png)
 
-You can experiment with any other activation function you find fit, I use the sigmoid because I found it yields a good 
-tradeoff between simplicity and quality.
+You can experiment with any other activation function you find fit, I use the sigmoid because I found 
+it yields a good tradeoff between simplicity and quality.
 
 In summary, our process for rendering a glyph will look like this:
+
 ```
 func RenderCharacter(Character):
 	Field := MakeGlyphSDF(Font, Size, Character)
@@ -93,4 +109,48 @@ func RenderCharacter(Character):
 		Bitmap[Point.x, Point.y] = ActivationFunc(Point)
 	DestroySDF(Field)
 	AddGlyphToCache(FontCache, Character, Bitmap) // Optional but highly recommended
+```
+
+## Using SDFs with STB truetype
+
+Now for a concrete implementation I will be using the [Odin](https://odin-lang.org) programming 
+language, it has libraries for STB vendored with the compiler and it will make life much easier, the 
+language is not complicated and the syntax is quite regular, you can easily translate this code into 
+pretty much any imperative procedural language.
+
+Let's start with a `Font` type to hold some metadata about our font.
+
+```odin
+import tt "vendor:stb/truetype"
+
+Font :: struct {
+	info: tt.fontinfo,      // Information related to the font
+	data: []byte,           // The raw font data from the TTF file
+	cache: map[rune]Bitmap, // Glyph cache
+	
+	height_px: f32,  // Target pixel size
+	edge_value: f32, // Opacity of pixel right on the glyph contour [0, 1]
+	dist_scale: f32, // Scaling factor for distance from contour
+	sharpness: f32,  // Sigmoid curve sharpness
+}
+```
+> *Note that odin uses a type called `rune`, this is a 32-bit integer used for representing a Unicode 
+> codepoint*
+
+We will also define 2 similar structs, one for our distance field and another one for a RGBA bitmap.
+
+```
+Field :: struct {
+	values: []u8,
+	width: int,
+	height: int,
+}
+
+Color :: [4]u8 // RGBA 8-bit color
+
+Bitmap :: struct {
+	pixels: []Color,
+	width: int,
+	height: int,
+}
 ```
